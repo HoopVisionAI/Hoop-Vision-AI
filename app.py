@@ -1,26 +1,25 @@
 import streamlit as st
 import tempfile
-import os
 import torch
 import numpy as np
 from moviepy.editor import VideoFileClip
-import easyocr
+from ultralytics import YOLO
 from deep_sort_realtime.deepsort_tracker import DeepSort
+from transformers import TrOCRProcessor, VisionEncoderDecoderModel
+from PIL import Image
 
 st.set_page_config(page_title="Hoop Vision AI", layout="wide")
-st.title("🏀 Hoop Vision AI - Real Stats Tracker (Headless)")
+st.title("🏀 Hoop Vision AI - Headless Stats Tracker")
 
 # ------------------------------
 # Upload video
 # ------------------------------
-uploaded = st.file_uploader("Upload a basketball game video", type=["mp4", "mov", "mkv"])
+uploaded = st.file_uploader("Upload a basketball game video", type=["mp4","mov","mkv"])
 
 # ------------------------------
 # Calibration inputs
 # ------------------------------
 st.subheader("Court Calibration")
-st.write("Set hoop box and 3PT line Y-coordinate (pixels)")
-
 hoop_x1 = st.number_input("Hoop X1", min_value=0, value=400)
 hoop_y1 = st.number_input("Hoop Y1", min_value=0, value=50)
 hoop_x2 = st.number_input("Hoop X2", min_value=0, value=500)
@@ -35,23 +34,26 @@ frame_skip = st.slider("Frame Skip (every N frames)", min_value=1, max_value=10,
 # ------------------------------
 if uploaded and st.button("Analyze Video"):
     st.video(uploaded)
-
     with st.spinner("Analyzing video..."):
-        # Save uploaded file
+        # Save temp video
         temp_video = tempfile.NamedTemporaryFile(delete=False, suffix=".mp4")
         temp_video.write(uploaded.read())
         video_path = temp_video.name
 
-        # -------------------------
-        # Load YOLO models (PyTorch only)
-        # -------------------------
+        # ------------------------------
+        # Load YOLO models
+        # ------------------------------
         device = "cuda" if torch.cuda.is_available() else "cpu"
-        player_model = torch.hub.load('ultralytics/yolov8', 'yolov8n.pt', pretrained=True).to(device)
-        ball_model = torch.hub.load('ultralytics/yolov8', 'yolov8n.pt', pretrained=True).to(device)  # Replace with basketball-trained model if available
+        player_model = YOLO("yolov8n.pt")
+        ball_model = YOLO("yolov8n.pt")  # replace with basketball-trained if available
 
-        reader = easyocr.Reader(['en'])
+        # ------------------------------
+        # Load TrOCR
+        # ------------------------------
+        processor = TrOCRProcessor.from_pretrained("microsoft/trocr-base-handwritten")
+        trocr_model = VisionEncoderDecoderModel.from_pretrained("microsoft/trocr-base-handwritten").to(device)
+
         tracker = DeepSort(max_age=30)
-
         player_stats = {}
         last_shot_frame = -30
         frame_number = 0
@@ -59,78 +61,63 @@ if uploaded and st.button("Analyze Video"):
         clip = VideoFileClip(video_path)
         for frame in clip.iter_frames(fps=int(clip.fps / frame_skip)):
             frame_number += 1
-            frame_rgb = np.array(frame)  # MoviePy gives RGB frames
+            frame_rgb = np.array(frame)
 
             # -------------------------
-            # 1) Player Detection (YOLO)
+            # Player detection & tracking
             # -------------------------
-            frame_tensor = torch.from_numpy(frame_rgb).permute(2,0,1).float()/255.0
-            frame_tensor = frame_tensor.unsqueeze(0).to(device)
-            player_results = player_model(frame_tensor)[0].cpu().detach().numpy()  # simplified
-            players = []  # fill with bboxes
-            # (Implement extraction from YOLO output here)
-
-            # Track players
+            results = player_model(frame_rgb)
+            players = []  # fill with YOLO output boxes
             tracks = tracker.update_tracks([p for p in players], frame=frame_rgb)
 
             # -------------------------
-            # 2) Jersey OCR
+            # Jersey recognition using TrOCR
             # -------------------------
             for tr in tracks:
                 if 'player_id' not in tr:
                     x1, y1, x2, y2 = tr[1]
                     crop = frame_rgb[int(y1):int(y2), int(x1):int(x2)]
-                    try:
-                        result = reader.readtext(crop)
-                        if result:
-                            tr['player_id'] = result[0][1]
-                            pid = tr['player_id']
-                            if pid not in player_stats:
-                                player_stats[pid] = {
-                                    "points":0, "makes":0, "attempts":0,
-                                    "three_pt_makes":0, "three_pt_attempts":0,
-                                    "rebounds":0, "assists":0
-                                }
-                    except:
-                        continue
+                    pil_img = Image.fromarray(crop)
+                    pixel_values = processor(images=pil_img, return_tensors="pt").pixel_values.to(device)
+                    generated_ids = trocr_model.generate(pixel_values)
+                    jersey_number = processor.batch_decode(generated_ids, skip_special_tokens=True)[0]
+                    if jersey_number:
+                        tr['player_id'] = jersey_number
+                        if jersey_number not in player_stats:
+                            player_stats[jersey_number] = {
+                                "points":0,"makes":0,"attempts":0,"three_pt_makes":0,"three_pt_attempts":0,
+                                "rebounds":0,"assists":0
+                            }
 
             # -------------------------
-            # 3) Ball Detection (YOLO)
+            # Ball detection
             # -------------------------
-            ball_results = ball_model(frame_tensor)[0].cpu().detach().numpy()
-            ball_bbox = None
-            # Extract bounding box of basketball from ball_results here
+            ball_results = ball_model(frame_rgb)
+            ball_bbox = None  # extract bounding box
 
             # -------------------------
-            # 4) Shot & 3PT Detection
+            # Shot detection
             # -------------------------
             if ball_bbox and (frame_number - last_shot_frame > 10):
                 bx = (ball_bbox[0]+ball_bbox[2])/2
                 by = (ball_bbox[1]+ball_bbox[3])/2
                 x1,y1,x2,y2 = hoop_box
                 if bx>x1 and bx<x2 and by>y1 and by<y2:
-                    # Assign nearest player as shooter
                     nearest_player = min(tracks, key=lambda t: abs((t[1][0]+t[1][2])/2 - bx))
                     if 'player_id' in nearest_player:
                         pid = nearest_player['player_id']
-
-                        # Update stats
                         player_stats[pid]["makes"] += 1
                         player_stats[pid]["attempts"] += 1
-
-                        # 3PT check
-                        player_y = (nearest_player[1][1]+nearest_player[1][3])/2
-                        if player_y < three_pt_y:
+                        if ((nearest_player[1][1]+nearest_player[1][3])/2) < three_pt_y:
                             player_stats[pid]["points"] += 3
                             player_stats[pid]["three_pt_makes"] += 1
                             player_stats[pid]["three_pt_attempts"] += 1
                         else:
                             player_stats[pid]["points"] += 2
-
                         last_shot_frame = frame_number
 
             # -------------------------
-            # 5) Rebound & Assist Detection (simplified)
+            # Rebound detection (simplified)
             # -------------------------
             if ball_bbox and (frame_number - last_shot_frame <= 5):
                 for tr in tracks:
@@ -139,7 +126,7 @@ if uploaded and st.button("Analyze Video"):
                         player_stats[pid]["rebounds"] += 1
 
         # -------------------------
-        # Display Stats
+        # Display stats
         # -------------------------
         st.subheader("📊 Player Stats")
         for pid, stats in player_stats.items():
