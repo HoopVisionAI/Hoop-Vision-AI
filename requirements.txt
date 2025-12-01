@@ -1,24 +1,24 @@
 # Streamlit frontend
 streamlit==1.51.0
 
-# OpenCV headless for video processing (no libGL errors)
+# OpenCV headless for image ops (no libGL errors)
 opencv-python-headless==4.12.0.88
 
 # YOLO object detection
 ultralytics==8.3.233
 
-# PyTorch (compatible with Python 3.13)
+# PyTorch for YOLO
 torch==2.9.1
 torchvision==0.24.1
 torchaudio==2.9.1
 
-# OCR for jersey recognition
+# OCR for jersey number recognition
 easyocr==1.7.2
 
 # Player tracking
 deep_sort_realtime==1.3.2
 
-# Video reading without OpenCV GUI
+# Video reading without GUI
 moviepy==1.0.3
 imageio-ffmpeg==0.4.9
 
