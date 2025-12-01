@@ -1,7 +1,6 @@
 import streamlit as st
 import tempfile
 import os
-import cv2
 import numpy as np
 from moviepy.editor import VideoFileClip
 from ultralytics import YOLO
@@ -9,7 +8,7 @@ import easyocr
 from deep_sort_realtime.deepsort_tracker import DeepSort
 
 st.set_page_config(page_title="Hoop Vision AI", layout="wide")
-st.title("🏀 Hoop Vision AI - Real Stats Tracker")
+st.title("🏀 Hoop Vision AI - Real Stats Tracker (Headless)")
 
 # ------------------------------
 # Upload video
@@ -20,7 +19,7 @@ uploaded = st.file_uploader("Upload a basketball game video", type=["mp4", "mov"
 # Calibration inputs
 # ------------------------------
 st.subheader("Court Calibration")
-st.write("Draw hoop box and set 3PT line Y-coordinate (pixels)")
+st.write("Set hoop box and 3PT line Y-coordinate (pixels)")
 
 hoop_x1 = st.number_input("Hoop X1", min_value=0, value=400)
 hoop_y1 = st.number_input("Hoop Y1", min_value=0, value=50)
@@ -29,8 +28,7 @@ hoop_y2 = st.number_input("Hoop Y2", min_value=0, value=100)
 hoop_box = [hoop_x1, hoop_y1, hoop_x2, hoop_y2]
 
 three_pt_y = st.number_input("3PT Line Y-coordinate", min_value=0, value=200)
-
-frame_skip = st.slider("Frame Skip (for speed, process every N frames)", min_value=1, max_value=10, value=5)
+frame_skip = st.slider("Frame Skip (every N frames)", min_value=1, max_value=10, value=5)
 
 # ------------------------------
 # Main processing
@@ -46,13 +44,13 @@ if uploaded and st.button("Analyze Video"):
 
         # Load models
         player_model = YOLO("yolov8n.pt")        # detect players
-        ball_model = YOLO("basketball_model.pt") # fine-tuned basketball detection
+        ball_model = YOLO("basketball_model.pt") # detect basketball
         reader = easyocr.Reader(['en'])
         tracker = DeepSort(max_age=30)
 
         # Stats dictionary
         player_stats = {}
-        last_shot_frame = -30  # prevent double-counting
+        last_shot_frame = -30
         frame_number = 0
 
         # -------------------------
@@ -61,7 +59,7 @@ if uploaded and st.button("Analyze Video"):
         clip = VideoFileClip(video_path)
         for frame in clip.iter_frames(fps=int(clip.fps / frame_skip)):
             frame_number += 1
-            frame_bgr = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
+            frame_bgr = frame[..., ::-1]  # RGB → BGR
 
             # -------------------------
             # 1) Player Detection
@@ -143,7 +141,7 @@ if uploaded and st.button("Analyze Video"):
                 for tr in tracks:
                     if 'player_id' in tr:
                         pid = tr['player_id']
-                        player_stats[pid]["rebounds"] += 1  # crude, can refine
+                        player_stats[pid]["rebounds"] += 1
 
         # -------------------------
         # Display Stats
