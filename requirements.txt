@@ -1,0 +1,12 @@
+streamlit
+opencv-python-headless
+numpy
+ultralytics
+torch
+torchvision
+torchaudio
+easyocr
+deep_sort_realtime
+moviepy
+pandas
+jinja2
