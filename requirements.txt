@@ -7,4 +7,3 @@ torchaudio
 easyocr
 deep_sort_realtime
 numpy
-
