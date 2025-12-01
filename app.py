@@ -1,11 +1,12 @@
 import streamlit as st
-import cv2
 import tempfile
 import os
+import cv2
+import numpy as np
+from moviepy.editor import VideoFileClip
 from ultralytics import YOLO
 import easyocr
 from deep_sort_realtime.deepsort_tracker import DeepSort
-import numpy as np
 
 st.set_page_config(page_title="Hoop Vision AI", layout="wide")
 st.title("🏀 Hoop Vision AI - Real Stats Tracker")
@@ -36,58 +37,52 @@ frame_skip = st.slider("Frame Skip (for speed, process every N frames)", min_val
 # ------------------------------
 if uploaded and st.button("Analyze Video"):
     st.video(uploaded)
+
     with st.spinner("Analyzing video..."):
         # Save uploaded file
         temp_video = tempfile.NamedTemporaryFile(delete=False, suffix=".mp4")
         temp_video.write(uploaded.read())
         video_path = temp_video.name
 
-        # Load video
-        cap = cv2.VideoCapture(video_path)
-        fps = cap.get(cv2.CAP_PROP_FPS)
-        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-        frame_num = 0
-
         # Load models
-        player_model = YOLO("yolov8n.pt")        # players
+        player_model = YOLO("yolov8n.pt")        # detect players
         ball_model = YOLO("basketball_model.pt") # fine-tuned basketball detection
         reader = easyocr.Reader(['en'])
         tracker = DeepSort(max_age=30)
 
         # Stats dictionary
         player_stats = {}
-        player_last_ball_frame = {}
         last_shot_frame = -30  # prevent double-counting
+        frame_number = 0
 
-        while True:
-            ret, frame = cap.read()
-            if not ret:
-                break
-            frame_num += 1
-
-            if frame_num % frame_skip != 0:
-                continue
+        # -------------------------
+        # Read video with MoviePy
+        # -------------------------
+        clip = VideoFileClip(video_path)
+        for frame in clip.iter_frames(fps=int(clip.fps / frame_skip)):
+            frame_number += 1
+            frame_bgr = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
 
             # -------------------------
             # 1) Player Detection
             # -------------------------
-            player_results = player_model(frame)
+            player_results = player_model(frame_bgr)
             players = []
             for res in player_results[0].boxes.data.tolist():
                 x1, y1, x2, y2, conf, cls = res
                 if conf > 0.3:
                     players.append({"bbox":[x1,y1,x2,y2], "cls": cls})
-            
+
             # Track players
-            tracks = tracker.update_tracks([p["bbox"] for p in players], frame=frame)
+            tracks = tracker.update_tracks([p["bbox"] for p in players], frame=frame_bgr)
 
             # -------------------------
             # 2) Jersey OCR
             # -------------------------
             for tr in tracks:
                 if 'player_id' not in tr:
-                    x1,y1,x2,y2 = tr[1]
-                    crop = frame[int(y1):int(y2), int(x1):int(x2)]
+                    x1, y1, x2, y2 = tr[1]
+                    crop = frame_bgr[int(y1):int(y2), int(x1):int(x2)]
                     try:
                         result = reader.readtext(crop)
                         if result:
@@ -105,7 +100,7 @@ if uploaded and st.button("Analyze Video"):
             # -------------------------
             # 3) Ball Detection
             # -------------------------
-            ball_results = ball_model(frame)
+            ball_results = ball_model(frame_bgr)
             ball_bbox = None
             for res in ball_results[0].boxes.data.tolist():
                 x1, y1, x2, y2, conf, cls = res
@@ -116,7 +111,7 @@ if uploaded and st.button("Analyze Video"):
             # -------------------------
             # 4) Shot & 3PT Detection
             # -------------------------
-            if ball_bbox and (frame_num - last_shot_frame > 10):
+            if ball_bbox and (frame_number - last_shot_frame > 10):
                 bx = (ball_bbox[0]+ball_bbox[2])/2
                 by = (ball_bbox[1]+ball_bbox[3])/2
                 x1,y1,x2,y2 = hoop_box
@@ -139,20 +134,16 @@ if uploaded and st.button("Analyze Video"):
                         else:
                             player_stats[pid]["points"] += 2
 
-                        # Mark frame of last shot
-                        last_shot_frame = frame_num
+                        last_shot_frame = frame_number
 
             # -------------------------
             # 5) Rebound & Assist Detection (simplified)
             # -------------------------
-            # Any player touching ball after missed shot within 5 frames -> rebound
-            if ball_bbox and (frame_num - last_shot_frame <= 5):
+            if ball_bbox and (frame_number - last_shot_frame <= 5):
                 for tr in tracks:
                     if 'player_id' in tr:
                         pid = tr['player_id']
                         player_stats[pid]["rebounds"] += 1  # crude, can refine
-
-        cap.release()
 
         # -------------------------
         # Display Stats
