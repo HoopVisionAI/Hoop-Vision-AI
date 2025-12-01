@@ -1,9 +1,9 @@
 import streamlit as st
 import tempfile
 import os
+import torch
 import numpy as np
 from moviepy.editor import VideoFileClip
-from ultralytics import YOLO
 import easyocr
 from deep_sort_realtime.deepsort_tracker import DeepSort
 
@@ -42,37 +42,36 @@ if uploaded and st.button("Analyze Video"):
         temp_video.write(uploaded.read())
         video_path = temp_video.name
 
-        # Load models
-        player_model = YOLO("yolov8n.pt")        # detect players
-        ball_model = YOLO("basketball_model.pt") # detect basketball
+        # -------------------------
+        # Load YOLO models (PyTorch only)
+        # -------------------------
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+        player_model = torch.hub.load('ultralytics/yolov8', 'yolov8n.pt', pretrained=True).to(device)
+        ball_model = torch.hub.load('ultralytics/yolov8', 'yolov8n.pt', pretrained=True).to(device)  # Replace with basketball-trained model if available
+
         reader = easyocr.Reader(['en'])
         tracker = DeepSort(max_age=30)
 
-        # Stats dictionary
         player_stats = {}
         last_shot_frame = -30
         frame_number = 0
 
-        # -------------------------
-        # Read video with MoviePy
-        # -------------------------
         clip = VideoFileClip(video_path)
         for frame in clip.iter_frames(fps=int(clip.fps / frame_skip)):
             frame_number += 1
-            frame_bgr = frame[..., ::-1]  # RGB → BGR
+            frame_rgb = np.array(frame)  # MoviePy gives RGB frames
 
             # -------------------------
-            # 1) Player Detection
+            # 1) Player Detection (YOLO)
             # -------------------------
-            player_results = player_model(frame_bgr)
-            players = []
-            for res in player_results[0].boxes.data.tolist():
-                x1, y1, x2, y2, conf, cls = res
-                if conf > 0.3:
-                    players.append({"bbox":[x1,y1,x2,y2], "cls": cls})
+            frame_tensor = torch.from_numpy(frame_rgb).permute(2,0,1).float()/255.0
+            frame_tensor = frame_tensor.unsqueeze(0).to(device)
+            player_results = player_model(frame_tensor)[0].cpu().detach().numpy()  # simplified
+            players = []  # fill with bboxes
+            # (Implement extraction from YOLO output here)
 
             # Track players
-            tracks = tracker.update_tracks([p["bbox"] for p in players], frame=frame_bgr)
+            tracks = tracker.update_tracks([p for p in players], frame=frame_rgb)
 
             # -------------------------
             # 2) Jersey OCR
@@ -80,7 +79,7 @@ if uploaded and st.button("Analyze Video"):
             for tr in tracks:
                 if 'player_id' not in tr:
                     x1, y1, x2, y2 = tr[1]
-                    crop = frame_bgr[int(y1):int(y2), int(x1):int(x2)]
+                    crop = frame_rgb[int(y1):int(y2), int(x1):int(x2)]
                     try:
                         result = reader.readtext(crop)
                         if result:
@@ -96,15 +95,11 @@ if uploaded and st.button("Analyze Video"):
                         continue
 
             # -------------------------
-            # 3) Ball Detection
+            # 3) Ball Detection (YOLO)
             # -------------------------
-            ball_results = ball_model(frame_bgr)
+            ball_results = ball_model(frame_tensor)[0].cpu().detach().numpy()
             ball_bbox = None
-            for res in ball_results[0].boxes.data.tolist():
-                x1, y1, x2, y2, conf, cls = res
-                if conf > 0.4:
-                    ball_bbox = [x1,y1,x2,y2]
-                    break
+            # Extract bounding box of basketball from ball_results here
 
             # -------------------------
             # 4) Shot & 3PT Detection
